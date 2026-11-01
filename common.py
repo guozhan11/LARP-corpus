@@ -12,7 +12,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-DATA = Path(os.environ.get('LARP_DATA', str(Path.home() / 'LARP_data' / 'replication'))).resolve()
+
+
+def env_setting(name):
+    """From the environment, otherwise this folder's .env (ignored by Git)."""
+    value = os.environ.get(name)
+    if not value and (HERE / '.env').exists():
+        for line in (HERE / '.env').read_text().splitlines():
+            if line.startswith(name + '='):
+                value = line.split('=', 1)[1].strip().strip('"\'')
+    return value
+
+
+DATA = Path(env_setting('LARP_DATA') or Path.home() / 'LARP_data' / 'replication').resolve()
 if DATA.is_relative_to(HERE):
     raise ValueError('Keep LARP_DATA outside the code folder (restricted corpus data).')
 CLOUD_ROOT = '/剧本杀语料/batch'

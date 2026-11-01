@@ -24,15 +24,19 @@ import unittest
 import warnings
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import common
-import download
-import snapshot
-import ocr
-import evaluate
-import make_book_list
+from importlib import import_module
 from PIL import Image
+
+make_book_list = import_module('01_make_book_list')
+download = import_module('02_download')
+snapshot = import_module('03_snapshot')
+ocr = import_module('04_ocr')
+rolling_ocr = import_module('04b_rolling_ocr')
+evaluate = import_module('05_evaluate')
 
 
 class ArchiveChecks(unittest.TestCase):
@@ -72,7 +76,7 @@ class WorkflowChecks(unittest.TestCase):
         self.stack = contextlib.ExitStack()
         self.addCleanup(self.stack.close)
         self.root = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
-        for module in (common, download, snapshot, ocr, evaluate, make_book_list):
+        for module in (common, download, snapshot, ocr, evaluate, make_book_list, rolling_ocr):
             self.stack.enter_context(patch.object(module, 'DATA', self.root))
         self.stack.enter_context(patch.object(ocr, 'RESPONSES', self.root / 'ocr' / 'responses'))
         self.stack.enter_context(patch.object(common, '_output', return_value='synthetic-test-environment'))
@@ -315,7 +319,7 @@ class WorkflowChecks(unittest.TestCase):
             return image.decode(), 'h'
         with patch.object(ocr, 'transcribe', side_effect=slow), \
                 concurrent.futures.ThreadPoolExecutor(4) as pool, patch.object(ocr, 'PAGE_POOL', pool):
-            texts = [t for t, _ in ocr.transcribe_all((str(i).encode() for i in range(12)), None)]
+            texts = [t for t, _, _ in ocr.transcribe_all((str(i).encode() for i in range(12)), None)]
         self.assertEqual(texts, [str(i) for i in range(12)])
 
     def test_pdf_render_warnings_are_recorded(self):
@@ -540,6 +544,164 @@ class WorkflowChecks(unittest.TestCase):
         two = one_book + [{'source': '0002_b/y.png', 'errors': 0, 'chars': 30}]
         low, high = evaluate.book_bootstrap(two, 1, draws=200)
         self.assertLess(low, high)
+
+    # Tall images
+
+    @staticmethod
+    def striped(height, gap_at=()):
+        """Text-like rows on white, except blank bands at the given rows."""
+        im = Image.new('RGB', (100, height), 'white')
+        for y in range(height):
+            if not any(start <= y < start + 10 for start in gap_at):
+                im.paste('black', (0, y, 50, y + 1))
+        return im
+
+    def test_tall_image_is_cut_in_a_blank_band_without_overlap(self):
+        notes = {}
+        tiles = ocr.tall_tiles(self.striped(500, gap_at=[190, 380]), notes)
+        heights = [Image.open(io.BytesIO(t)).height for t in tiles]
+        self.assertEqual(heights, [198, 190, 112])   # adding up to the full height: nothing repeats
+        self.assertEqual(notes, {})
+
+    def test_tall_image_without_blank_band_overlaps_and_is_flagged(self):
+        im = self.striped(500)
+        im.paste('white', (0, 190, 100, 192))   # too narrow to count as a gap between lines
+        notes = {}
+        heights = [Image.open(io.BytesIO(t)).height for t in ocr.tall_tiles(im, notes)]
+        self.assertEqual(heights[0], 200)
+        self.assertGreater(sum(heights), 500)
+        self.assertTrue(notes['overlapping_tiles_need_review'])
+
+    def test_tall_image_is_sent_whole_when_it_keeps_full_resolution(self):
+        path = self.root / 'tall.png'
+        self.striped(500).save(path)
+        self.assertEqual(len(ocr.image_pages(path)), 1)
+
+    # Partial losses are recorded, not hidden
+
+    def test_failed_page_keeps_the_other_pages_and_can_be_retried(self):
+        path = self.root / 'two.tif'
+        frames = [Image.new('RGB', (40, 40), color) for color in ('white', 'black')]
+        frames[0].save(path, save_all=True, append_images=frames[1:])
+        row = {'source': 'book/two.tif', 'kind': 'image', 'path': 'two.tif', 'sha256': common.sha256(path)}
+        replies = iter([('page one', 'a'), ValueError('rejected')])
+
+        def reply(image, budget):
+            answer = next(replies)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+        with patch.object(ocr, 'transcribe', reply):
+            record = ocr.process(row, self.root / 'out', ocr.Budget(1, False))
+        self.assertEqual((record['status'], record['failed_pages']), ('partial', [2]))
+        self.assertEqual((self.root / 'out/text/book/two.tif.txt').read_text(), 'page one\f')
+        with patch.object(ocr, 'transcribe', side_effect=ValueError('rejected')):
+            self.assertEqual(ocr.process(row, self.root / 'out', ocr.Budget(1, False))['status'], 'failed')
+
+    def test_doubtful_encodings_are_flagged_not_guessed(self):
+        path = self.root / 'text.txt'
+        sample = '這是一段繁體中文的劇本內容，偵探走進房間。'
+        path.write_bytes(sample.encode('utf-16'))
+        self.assertEqual(ocr.plain_text(path)[0], sample)
+        path.write_bytes(sample.encode('big5'))
+        self.assertTrue(ocr.plain_text(path)[1]['encoding_needs_review'])
+        path.write_bytes('这是一段简体中文的剧本内容，侦探走进房间。'.encode('gbk'))
+        self.assertFalse(ocr.plain_text(path)[1]['encoding_needs_review'])
+
+    def test_snapshot_summary_lists_archives_it_could_not_unpack(self):
+        self.make_snapshot()
+        bad = self.root / 'raw/0001_synthetic/bad.zip'
+        bad.write_bytes(b'not a zip')
+        path = self.root / 'download/0001_synthetic.json'
+        record = common.read_json(path)
+        record['files'].append({'file': 'bad.zip', 'status': 'ok', 'bytes': 9, 'sha256': common.sha256(bad)})
+        common.write_json(path, record)
+        self.call(snapshot, '--name', 'second')
+        self.assertEqual(common.read_json(self.root / 'snapshot/second/summary.json')['archives_not_unpacked'],
+                         ['0001_synthetic/bad.zip'])
+
+    def test_download_stops_when_the_cloud_account_is_lost(self):
+        common.write_csv(self.root / 'books.csv', [{'idx': i, 'folder': i, 'title': 't', 'share_url': 's'} for i in ('0001', '0002')],
+                         ['idx', 'folder', 'title', 'share_url'])
+        failed = {'status': 'failed'}
+        with patch.object(download, 'download_book', return_value=failed) as book, patch.object(download, 'logged_in', return_value=False):
+            self.call(download)
+        self.assertEqual(book.call_count, 1)
+
+    def test_interrupted_snapshot_leaves_nothing_and_can_be_rerun(self):
+        self.make_snapshot()
+        with patch.object(snapshot, 'write_json', side_effect=OSError('disk')), self.assertRaises(OSError):
+            self.call(snapshot, '--name', 'second')
+        self.assertFalse((self.root / 'snapshot/second').exists())
+        self.call(snapshot, '--name', 'second')
+        self.assertTrue((self.root / 'snapshot/second/summary.json').exists())
+
+    def test_cloned_input_that_differs_from_its_hash_is_rejected(self):
+        source = self.root / 'source' / 'page.txt'
+        source.parent.mkdir()
+        source.write_text('original')
+
+        def changed_clone(command, **kwargs):
+            Path(command[-1]).write_text('changed')
+            return SimpleNamespace(returncode=0)
+        with patch.object(snapshot.subprocess, 'run', changed_clone), self.assertRaises(ValueError):
+            snapshot.walk(source.parent, 'book', 'book', [])
+        self.assertEqual(list((self.root / 'inputs').rglob('page.txt')), [])
+
+    # OCR rounds during a download
+
+    def test_rolling_restart_finishes_a_round_interrupted_before_ocr(self):
+        self.make_snapshot()
+        calls, step = self.rolling_steps()
+
+        def interrupted(script, *args):
+            if script == '04_ocr.py':
+                raise SystemExit('interrupted')
+            step(script, *args)
+        with patch.object(rolling_ocr, 'download_running', lambda: False):
+            with patch.object(rolling_ocr, 'step', interrupted), self.assertRaises(SystemExit):
+                self.call(rolling_ocr)
+            self.assertEqual(rolling_ocr.settled_books(), set())
+            with patch.object(rolling_ocr, 'step', step):
+                self.call(rolling_ocr)
+        self.assertEqual(rolling_ocr.settled_books(), {'0001_synthetic', '0002_synthetic'})
+
+    def rolling_steps(self):
+        calls = []
+
+        def step(script, *args):
+            calls.append((script, args))
+            self.call({'03_snapshot.py': snapshot, '04_ocr.py': ocr}[script], *args)
+        return calls, step
+
+    def test_rolling_rounds_send_only_unfinished_books_and_stop_with_download(self):
+        self.make_snapshot(incomplete=('0002',))
+        calls, step = self.rolling_steps()
+        record = self.root / 'download' / '0002_synthetic.json'
+
+        def second_book_finishes(seconds):
+            common.write_json(record, {**common.read_json(record), 'status': 'complete'})
+        running = iter([True, True, False, False])
+        with patch.object(rolling_ocr, 'step', step), \
+                patch.object(rolling_ocr, 'download_running', lambda: next(running)), \
+                patch.object(rolling_ocr.time, 'sleep', second_book_finishes):
+            self.call(rolling_ocr, '--min-new-books', '1')
+        only = [args[args.index('--only') + 1:args.index('--workers')] for script, args in calls if script == '04_ocr.py']
+        self.assertEqual(only, [('0001',), ('0002',)])
+        self.assertEqual(rolling_ocr.rounds(), ['rolling_01', 'rolling_02'])
+        self.assertEqual(rolling_ocr.settled_books(), {'0001_synthetic', '0002_synthetic'})
+
+    def test_rolling_limit_counts_all_rounds_and_stops_new_requests(self):
+        self.make_snapshot()
+        calls, step = self.rolling_steps()
+        common.write_json(self.root / 'runs' / 'ocr_2000' / 'run.json', {
+            'arguments': {'snapshot': 'rolling_01'}, 'summary': {'new_cost_cny_estimate': 600.0}})
+        common.write_json(self.root / 'runs' / 'ocr_2001' / 'run.json', {
+            'arguments': {'snapshot': 'test'}, 'summary': {'new_cost_cny_estimate': 900.0}})
+        self.assertEqual(rolling_ocr.spent(), 600.0)
+        with patch.object(rolling_ocr, 'step', step), patch.object(rolling_ocr, 'download_running', lambda: False):
+            self.call(rolling_ocr, '--max-total-cny', '600')
+        self.assertEqual(calls, [])
 
 
 if __name__ == '__main__':

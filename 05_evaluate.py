@@ -4,8 +4,8 @@ Draw saves images, model text, and editable corrected text. Reviewers correct
 those copies and fill sample.csv's reviewer column. Score freezes the answers
 and saves a new result with a book-cluster bootstrap interval; it never overwrites one.
 
-python evaluate.py draw --snapshot batch1 --name eval1 --n 300 --seed 20261020
-python evaluate.py score --name eval1
+python 05_evaluate.py draw --snapshot batch1 --name eval1 --n 300 --seed 20261020
+python 05_evaluate.py score --name eval1
 """
 import argparse
 import common
@@ -13,9 +13,11 @@ import hashlib
 import json
 import random
 import re
+from importlib import import_module
 from rapidfuzz.distance import Levenshtein
 from common import DATA, now, read_json, record_run, read_csv, write_csv, finish_run, sha256, write_json
-import ocr
+
+ocr = import_module('04_ocr')
 
 
 def page_images(row, record):

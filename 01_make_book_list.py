@@ -4,7 +4,7 @@ The study scope (852 titles rated 7.0 or higher, one version each) was decided
 before this code; it is read from the scope file and the link manifest and
 written once as books.csv. Every later step reads only books.csv.
 
-python3 make_book_list.py \
+python3 01_make_book_list.py \
     --scope /path/to/scope.json \
     --manifest data/manifest.csv
 """

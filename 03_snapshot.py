@@ -7,7 +7,7 @@ Keep bytes under inputs/, and list sources, readers and exclusions in
 snapshot/<name>/files.csv. Archive sources use <archive>!/<member> notation;
 nesting is limited to three levels. Existing snapshots are never replaced.
 
-python snapshot.py --name batch1
+python 03_snapshot.py --name batch1
 """
 import argparse
 import common
@@ -15,9 +15,11 @@ import shutil
 import subprocess
 import zipfile
 import unicodedata
+from importlib import import_module
 from pathlib import Path, PurePosixPath
-from download import completed_download
 from common import DATA, now, read_json, record_run, read_csv, write_csv, finish_run, sha256, write_json
+
+completed_download = import_module('02_download').completed_download
 
 KINDS = {
     'image': {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tif', '.tiff', '.heic', '.gif'},
@@ -125,11 +127,15 @@ def walk(root, source_prefix, book, rows, depth=0, known=None):
         if not frozen.exists():
             # An APFS clone is an independent copy that takes no space until one side
             # changes, so later edits to the download cannot alter the frozen input.
-            if subprocess.run(['cp', '-c', str(path), str(frozen)], capture_output=True).returncode:
-                frozen.unlink(missing_ok=True)
-                shutil.copy2(path, frozen)   # not APFS: an ordinary copy
-                if sha256(frozen) != digest:
-                    raise ValueError(f'copy differs from source: {frozen}')
+            partial = frozen.parent / '.partial'   # an interrupted copy never takes the input's name
+            partial.unlink(missing_ok=True)
+            if subprocess.run(['cp', '-c', str(path), str(partial)], capture_output=True).returncode:
+                partial.unlink(missing_ok=True)
+                shutil.copy2(path, partial)   # not APFS: an ordinary copy
+            if sha256(partial) != digest:
+                partial.unlink()
+                raise ValueError(f'copy differs from source: {frozen}')
+            partial.replace(frozen)
         elif sha256(frozen) != digest:   # left by an earlier snapshot: must be unchanged
             raise ValueError(f'frozen input changed: {frozen}')
         row = {'book': book, 'source': f'{source_prefix}/{relative}', 'path': str(frozen.relative_to(DATA)),
@@ -187,17 +193,22 @@ def main():
         raise SystemExit('no completely downloaded book to freeze')
     if len({r['source'] for r in rows}) != len(rows):
         raise ValueError('source names collide; snapshot not written')
-    out.mkdir(parents=True)
-    write_csv(out / 'files.csv', rows, ['book', 'source', 'path', 'kind', 'note', 'bytes', 'sha256'])
-    write_csv(out / 'books.csv', books, ['idx', 'folder', 'download_status', 'included', 'reason'])
+    work = DATA / 'snapshot_partial' / a.name   # an interrupted run leaves no snapshot behind
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
+    write_csv(work / 'files.csv', rows, ['book', 'source', 'path', 'kind', 'note', 'bytes', 'sha256'])
+    write_csv(work / 'books.csv', books, ['idx', 'folder', 'download_status', 'included', 'reason'])
     counts = {}
     for r in rows:
         counts[r['kind']] = counts.get(r['kind'], 0) + 1
-    write_json(out / 'summary.json', {'created': now(), 'files_by_kind': counts,
+    write_json(work / 'summary.json', {'created': now(), 'files_by_kind': counts,
+               'archives_not_unpacked': [r['source'] for r in rows if r['note'].startswith('archive could not')],
                'books_included': sum(b['included'] == 'yes' for b in books), 'books_listed': len(books),
                'books_by_download_status': {s: sum(b['download_status'] == s for b in books)
                                             for s in sorted({b['download_status'] for b in books})},
-               'files_csv_sha256': sha256(out / 'files.csv'), 'books_csv_sha256': sha256(out / 'books.csv')})
+               'files_csv_sha256': sha256(work / 'files.csv'), 'books_csv_sha256': sha256(work / 'books.csv')})
+    out.parent.mkdir(exist_ok=True)
+    work.rename(out)
     finish_run(run, [out / 'files.csv', out / 'books.csv', out / 'summary.json'], files_by_kind=counts)
     print(counts)
 

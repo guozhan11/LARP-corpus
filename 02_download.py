@@ -4,7 +4,7 @@ Verify size and content MD5, or apply a recorded hash-specific human decision.
 Keep replacements and unverified candidates; record every file's status.
 Requires BaiduPCS-Go logged in. Run one script instance per data directory.
 
-python download.py [--only 1395] [--workers 3]
+python 02_download.py [--only 1395] [--workers 3]
 """
 import argparse
 import common
@@ -71,6 +71,18 @@ def size_matches(local_bytes, shown):
         return False
     unit = UNITS[m.group(2)]
     return abs(local_bytes - float(m.group(1)) * unit) <= 0.005 * unit + 1
+
+
+def logged_in():
+    """Asked three times: the client now and then fails on a brief network timeout."""
+    for attempt in range(3):
+        try:
+            if '总空间' in pcs('quota', timeout=60):
+                return True
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        time.sleep(30)
+    return False
 
 
 def save_share(url, remote):
@@ -299,6 +311,10 @@ def main():
             print(stopped, flush=True)
             break
         print(book['folder'], r['status'], len(r.get('files', [])), flush=True)
+        if r['status'] == 'failed' and not logged_in():
+            stopped = f"stopped at {book['folder']}: cloud account not reachable; log in to {PCS} and run again"
+            print(stopped, flush=True)
+            break
     summary = {}
     for book in all_books:
         status = (read_json(DATA / 'download' / f"{book['folder']}.json") or {}).get('status', 'not_started')

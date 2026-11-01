@@ -5,8 +5,8 @@ files use direct readers. Keep page responses and conversion intermediates.
 Output: text/<source>.txt (pages separated by form feed), files/<id>.json,
 and a full-snapshot results.csv. Offline replay compares every text file.
 
-python ocr.py --snapshot batch1 [--only 1395] [--redo-failed]
-python ocr.py --snapshot batch1 --offline
+python 04_ocr.py --snapshot batch1 [--only 1395] [--redo-failed]
+python 04_ocr.py --snapshot batch1 --offline
 """
 import argparse
 import common
@@ -17,7 +17,6 @@ import hashlib
 import io
 import json
 import multiprocessing
-import os
 import shutil
 import subprocess
 import tempfile
@@ -33,7 +32,7 @@ import openpyxl
 import pillow_heif
 from PIL import Image, ImageOps
 from common import (API_URL, DATA, HERE, JPEG_QUALITY, LONG_SIDE, MODEL, PARAMETERS, PRICE_CNY_PER_MILLION, PROMPT,
-                    SOFFICE, TALL_RATIO, TILE_OVERLAP, now, read_json, record_run, read_csv, write_csv, finish_run, sha256, write_json)
+                    SOFFICE, TALL_RATIO, TILE_OVERLAP, env_setting, now, read_json, record_run, read_csv, write_csv, finish_run, sha256, write_json)
 
 pillow_heif.register_heif_opener()
 Image.MAX_IMAGE_PIXELS = None   # large scans are expected; the inputs are the downloaded scripts
@@ -63,35 +62,74 @@ class Budget:
 
 # ---------- page images ----------
 
-def jpeg(im):
+def flat_rgb(im):
     if im.mode in ('RGBA', 'LA', 'PA') or (im.mode == 'P' and 'transparency' in im.info):
         rgba = im.convert('RGBA')
         flat = Image.new('RGB', rgba.size, 'white')
         flat.paste(rgba, mask=rgba.getchannel('A'))
         im = flat
-    im = im.convert('RGB')
+    return im.convert('RGB')
+
+
+def jpeg(im):
+    im = flat_rgb(im)
     im.thumbnail((LONG_SIDE, LONG_SIDE), Image.Resampling.LANCZOS)
     out = io.BytesIO()
     im.save(out, format='JPEG', quality=JPEG_QUALITY, optimize=True)
     return out.getvalue()
 
 
-def image_pages(path):
-    """JPEG bytes for each frame, tall frames cut into overlapping tiles."""
+SEAM_SEARCH = 0.3    # look this share of a tile above its bottom for a blank band
+BLANK_RANGE = 48     # gray levels from a row's background still blank (JPEG noise around text)
+BLANK_BAND = 0.004   # of the width: the thinnest gap between lines to cut in
+
+
+def blank_row(gray, y):
+    counts = gray.crop((0, y, gray.width, y + 1)).histogram()
+    background = counts.index(max(counts))
+    return sum(counts[max(background - BLANK_RANGE, 0):background + BLANK_RANGE + 1]) == gray.width
+
+
+def blank_cut(gray, bottom, lowest):
+    """The row nearest above `bottom` in the middle of a blank band, or None."""
+    band = max(3, int(BLANK_BAND * gray.width))
+    run = 0
+    for y in range(bottom - 1, lowest - 1, -1):
+        run = run + 1 if blank_row(gray, y) else 0
+        if run == band:
+            return y + band // 2
+    return None
+
+
+def tall_tiles(im, notes):
+    """Cut a tall frame in blank bands between lines, so no text repeats or splits.
+    Where no band is found, the seam overlaps and is flagged for review."""
+    im = flat_rgb(im)
+    gray = im.convert('L')
+    tile = int(TALL_RATIO * im.width)
+    tiles, top = [], 0
+    while top + tile < im.height:
+        cut = blank_cut(gray, top + tile, top + int(tile * (1 - SEAM_SEARCH)))
+        tiles.append(jpeg(im.crop((0, top, im.width, cut or top + tile))))
+        top = cut or top + int(tile * (1 - TILE_OVERLAP))
+        if not cut:
+            notes['overlapping_tiles_need_review'] = True
+    tiles.append(jpeg(im.crop((0, top, im.width, im.height))))
+    return tiles
+
+
+def image_pages(path, notes=None):
+    """JPEG bytes for each frame, tall frames cut into tiles."""
+    notes = {} if notes is None else notes
     pages = []
     with Image.open(path) as opened:
         for frame in range(getattr(opened, 'n_frames', 1)):
             opened.seek(frame)
             im = ImageOps.exif_transpose(opened.copy())
-            if im.height <= TALL_RATIO * im.width:
+            if im.height <= max(TALL_RATIO * im.width, LONG_SIDE):   # sent whole, at full resolution
                 pages.append(jpeg(im))
-                continue
-            tile = int(TALL_RATIO * im.width)
-            step = int(tile * (1 - TILE_OVERLAP))
-            for top in range(0, max(im.height - tile, 0) + step, step):
-                pages.append(jpeg(im.crop((0, top, im.width, min(top + tile, im.height)))))
-                if top + tile >= im.height:
-                    break
+            else:
+                pages += tall_tiles(im, notes)
     return pages
 
 
@@ -267,23 +305,25 @@ def xlsx_text(path):
 
 def plain_text(path):
     raw = path.read_bytes()
-    for encoding in ('utf-8-sig', 'gb18030'):
+    encodings = ('utf-16',) if raw.startswith((b'\xff\xfe', b'\xfe\xff')) else ('utf-8-sig', 'gb18030')
+    for encoding in encodings:
         try:
-            return raw.decode(encoding), {'encoding': encoding}
+            text = raw.decode(encoding)
         except UnicodeDecodeError:
-            pass
-    raise ValueError('text is neither UTF-8 nor GB18030')
+            continue
+        info = {'encoding': encoding}
+        if encoding == 'gb18030':
+            # Big5 and others can decode here without error, as rare characters: flag, do not guess.
+            wide = ''.join(c for c in text if ord(c) > 127)
+            info['encoding_needs_review'] = len(wide.encode('gb2312', 'ignore')) < 1.8 * len(wide)
+        return text, info
+    raise ValueError(f'text is not {" or ".join(encodings)}')
 
 
 # ---------- model ----------
 
 def api_key():
-    key = os.environ.get('DASHSCOPE_API_KEY')
-    if not key and (HERE / '.env').exists():
-        for line in (HERE / '.env').read_text().splitlines():
-            if line.startswith('DASHSCOPE_API_KEY='):
-                key = line.split('=', 1)[1].strip().strip('"\'')
-    return key
+    return env_setting('DASHSCOPE_API_KEY')
 
 
 def response_text(response):
@@ -383,12 +423,22 @@ def transcribe_locked(image, image_sha, key, budget):
 PAGE_POOL, PAGE_BATCH = None, 8
 
 
+def page_result(image, budget):
+    """(text, image hash, error): one failed page must not lose the file's other pages."""
+    try:
+        return (*transcribe(image, budget), None)
+    except LimitReached:
+        raise
+    except Exception as exc:
+        return '', hashlib.sha256(image).hexdigest(), f'{type(exc).__name__}: {exc}'
+
+
 def transcribe_all(images, budget):
     if PAGE_POOL is None:
-        return [transcribe(image, budget) for image in images]
+        return [page_result(image, budget) for image in images]
     results, batch = [], []
     for image in images:
-        batch.append(PAGE_POOL.submit(transcribe, image, budget))
+        batch.append(PAGE_POOL.submit(page_result, image, budget))
         if len(batch) >= PAGE_BATCH:
             results += [f.result() for f in batch]
             batch = []
@@ -407,21 +457,23 @@ def process(row, out, budget):
         notes = {}
         if row['kind'] in ('image', 'pdf', 'slides'):
             if row['kind'] == 'image':
-                images, method = image_pages(path), 'ocr_image'
+                images, method = image_pages(path, notes), 'ocr_image'
             elif row['kind'] == 'pdf':
                 images, method = pdf_pages(path, notes), 'ocr_pdf'
             else:
                 images, method = pdf_pages(convert(path, 'pdf', kept.with_suffix('.pdf'), SLIDES_FILTER, budget.offline),
                                            notes), 'libreoffice_pdf_then_ocr'
             pages = transcribe_all(images, budget)
-            text = '\f'.join(t for t, _ in pages)
-            record.update(method=method, pages=len(pages), page_image_sha256=[h for _, h in pages], **notes)
+            failed = [(number, error) for number, (_, _, error) in enumerate(pages, 1) if error]
+            if failed and len(failed) == len(pages):
+                raise ValueError(failed[0][1])
+            text = '\f'.join(t for t, _, _ in pages)
+            record.update(method=method, pages=len(pages), page_image_sha256=[h for _, h, _ in pages], **notes)
+            if failed:
+                record.update(failed_pages=[number for number, _ in failed], error=failed[0][1][:300])
             # Warnings and repairs mean the page image may not match the print; unembedded
             # fonts alone are recorded (about 8% of PDFs) but usually render correctly.
             record['render_needs_review'] = bool(notes.get('render_warnings') or notes.get('repaired_file_structure'))
-            if row['kind'] == 'image':
-                with Image.open(path) as im:
-                    record['overlapping_tiles_need_review'] = len(pages) > getattr(im, 'n_frames', 1)
         else:
             if row['kind'] in ('word', 'sheet'):
                 extension, reader = ('docx', docx_text) if row['kind'] == 'word' else ('xlsx', xlsx_text)
@@ -434,7 +486,7 @@ def process(row, out, budget):
         target = out / 'text' / (row['source'] + '.txt')
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text, encoding='utf-8')
-        record.update(status='done', chars=len(text), text_sha256=sha256(target))
+        record.update(status='partial' if record.get('failed_pages') else 'done', chars=len(text), text_sha256=sha256(target))
     except LimitReached:
         record.update(status='not_started')
     except Exception as exc:   # one unreadable file must not stop the run; the error is recorded
@@ -493,14 +545,14 @@ def main():
     out = DATA / 'ocr' / (a.snapshot + ('_replay' if a.offline else ''))
     out.mkdir(parents=True, exist_ok=True)
     recipe = {'api_url': API_URL, 'snapshot_sha256': sha256(snapshot / 'files.csv'), 'parameters': PARAMETERS,
-              'prompt_sha256': PROMPT_SHA256, 'ocr_code_sha256': sha256(HERE / 'ocr.py'),
+              'prompt_sha256': PROMPT_SHA256, 'ocr_code_sha256': sha256(HERE / '04_ocr.py'),
               # Only the settings in common.py that shape the text; its other helpers may change.
               'render': {'long_side': LONG_SIDE, 'jpeg_quality': JPEG_QUALITY,
                          'tall_ratio': TALL_RATIO, 'tile_overlap': TILE_OVERLAP}}
     saved = read_json(original / 'recipe.json')
     if saved != recipe:
         if saved or a.offline or (original / 'files').exists():
-            raise SystemExit('OCR recipe changed or missing; restore the recorded ocr.py/settings, or run under a '
+            raise SystemExit('OCR recipe changed or missing; restore the recorded 04_ocr.py/settings, or run under a '
                              'new snapshot name (kept model responses are reused, so finished pages cost nothing)')
         write_json(original / 'recipe.json', recipe)
     run = record_run('ocr_offline' if a.offline else 'ocr', vars(a),
@@ -530,11 +582,12 @@ def main():
         if record['status'] == 'done' and not valid_done(row, out, record):
             record = {**record, 'status': 'invalid', 'error': 'source or output missing/changed'}
         results.append(record)
-    fields = ['source', 'kind', 'method', 'status', 'pages', 'chars', 'source_sha256', 'text_sha256', 'error']
+    fields = ['source', 'kind', 'method', 'status', 'pages', 'chars', 'source_sha256', 'text_sha256', 'failed_pages', 'error']
     write_csv(out / 'results.csv', results, fields)
     counts = {s: sum(r['status'] == s for r in results) for s in sorted({r['status'] for r in results})}
     summary = {'files': counts,
                'overlapping_tile_files_needing_review': sum(bool(r.get('overlapping_tiles_need_review')) for r in results),
+               'text_files_with_encoding_to_review': sum(bool(r.get('encoding_needs_review')) for r in results),
                'pdf_files_with_render_warnings': sum(bool(r.get('render_needs_review')) for r in results),
                'pdf_files_with_unembedded_cid_fonts': sum(bool(r.get('unembedded_cid_fonts')) for r in results), 'new_cost_cny_estimate': round(budget.spent, 2), 'run_record': str(run)}
     outputs = [out / 'results.csv', *sorted((out / 'files').glob('*.json')),
