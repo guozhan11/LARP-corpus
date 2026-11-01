@@ -1,0 +1,6 @@
+# Direct dependency versions used for the offline regression checks (Python 3.12).
+pymupdf==1.26.5
+pillow==12.3.0
+pillow-heif==1.7.0
+openpyxl==3.1.5
+rapidfuzz==3.14.5
