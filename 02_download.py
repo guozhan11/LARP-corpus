@@ -3,6 +3,7 @@
 Verify size and content MD5, or apply a recorded hash-specific human decision.
 Keep replacements and unverified candidates; record every file's status.
 Requires BaiduPCS-Go logged in. Run one script instance per data directory.
+Books that failed in an earlier run are retried at the end, after all others.
 
 python 02_download.py [--only 1395] [--workers 3]
 """
@@ -88,7 +89,11 @@ def logged_in():
 def save_share(url, remote):
     """Save a shared link into the cloud folder `remote` (created first)."""
     pcs('mkdir', remote, timeout=60)
-    if '改变工作目录' not in pcs('cd', remote, timeout=60):
+    for attempt in range(3):   # the client now and then fails on a brief network timeout
+        if '改变工作目录' in pcs('cd', remote, timeout=60):
+            break
+        time.sleep(30)
+    else:
         raise RuntimeError(f'cannot open cloud folder {remote}')
     out = pcs('transfer', url, '--collect', timeout=1800)
     if '转存到网盘成功' not in out:
@@ -158,7 +163,7 @@ def fetch(item, remote_root, local_root):
                 checked = inspect_download(staged, item)
                 if checked:
                     break
-                time.sleep(20 * (attempt + 1))
+                time.sleep(20)
             if not checked:
                 return {**entry, 'status': 'missing_or_unverified', 'client_output': out[-300:]}
             if checked['status'] != 'ok':
@@ -299,6 +304,11 @@ def main():
     run = record_run('download', vars(a), [DATA / 'books.csv',
                      *([decision_path] if decision_path.exists() else []),
                      *sorted((DATA / 'download').glob('*.json'))])
+    # Books whose share could not be saved last time go last: a dead or refused link
+    # should not hold up, or (through a flaky login check) stop, the rest of the run.
+    failed_before = {b['folder'] for b in books
+                     if (read_json(DATA / 'download' / f"{b['folder']}.json") or {}).get('status') == 'failed'}
+    books = [b for b in books if b['folder'] not in failed_before] + [b for b in books if b['folder'] in failed_before]
     stopped = None
     for book in books:
         old = read_json(DATA / 'download' / f"{book['folder']}.json", {})

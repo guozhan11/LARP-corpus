@@ -71,13 +71,15 @@ def write_json(path, data):
     """Each writer owns its temporary file; readers see only complete JSON."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=path.parent, delete=False) as f:
-        tmp = Path(f.name)
-        json.dump(data, f, ensure_ascii=False, indent=1)
+    tmp = None
     try:
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=path.parent, delete=False) as f:
+            tmp = Path(f.name)
+            json.dump(data, f, ensure_ascii=False, indent=1)
         tmp.replace(path)
-    finally:
-        tmp.unlink(missing_ok=True)
+    finally:   # a failed write leaves no temporary file behind
+        if tmp is not None:
+            tmp.unlink(missing_ok=True)
 
 
 def read_json(path, default=None):

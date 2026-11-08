@@ -198,6 +198,9 @@ def pdf_pages(path, notes=None):
     file structure."""
     def note(kind, what, number):
         if notes is not None:
+            # MuPDF messages can quote broken strings from the file as lone surrogates,
+            # which cannot be written as UTF-8; keep them as visible escapes.
+            what = what.encode('utf-8', 'backslashreplace').decode('utf-8')
             pages = notes.setdefault(kind, {}).setdefault(what, [])
             if number not in pages:
                 pages.append(number)

@@ -7,7 +7,11 @@ Keep bytes under inputs/, and list sources, readers and exclusions in
 snapshot/<name>/files.csv. Archive sources use <archive>!/<member> notation;
 nesting is limited to three levels. Existing snapshots are never replaced.
 
-python 03_snapshot.py --name batch1
+--quick checks files already verified by an earlier snapshot by size and
+modification time instead of re-reading them; new files are still hashed. For
+working rounds only: make the study snapshot without it.
+
+python 03_snapshot.py --name batch1 [--quick]
 """
 import argparse
 import common
@@ -110,9 +114,10 @@ def unpack(archive, target):
     work.rename(target)
 
 
-def walk(root, source_prefix, book, rows, depth=0, known=None):
+def walk(root, source_prefix, book, rows, depth=0, known=None, quick=False):
     """List files under root; source_prefix names root in the snapshot.
-    known: SHA-256 per NFC-normalized relative path, verified just before (downloads)."""
+    known: SHA-256 per NFC-normalized relative path, verified just before (downloads).
+    quick: an existing frozen input of the same size is taken as unchanged."""
     for path in sorted(p for p in root.rglob('*') if p.is_file()):
         relative = path.relative_to(root)
         kind, reason = classify(path)
@@ -136,6 +141,9 @@ def walk(root, source_prefix, book, rows, depth=0, known=None):
                 partial.unlink()
                 raise ValueError(f'copy differs from source: {frozen}')
             partial.replace(frozen)
+        elif quick:
+            if frozen.stat().st_size != path.stat().st_size:
+                raise ValueError(f'frozen input changed: {frozen}')
         elif sha256(frozen) != digest:   # left by an earlier snapshot: must be unchanged
             raise ValueError(f'frozen input changed: {frozen}')
         row = {'book': book, 'source': f'{source_prefix}/{relative}', 'path': str(frozen.relative_to(DATA)),
@@ -148,7 +156,7 @@ def walk(root, source_prefix, book, rows, depth=0, known=None):
                 shutil.rmtree(target, ignore_errors=True)
                 unpack(frozen, target)
                 children = []
-                walk(target, row['source'] + '!', book, children, depth + 1)
+                walk(target, row['source'] + '!', book, children, depth + 1, quick=quick)
                 rows.extend(children)
             except Exception as exc:   # encrypted, damaged or unsupported archives are listed, not fatal
                 row.update(kind='excluded', note=f'archive could not be unpacked: {exc}'[:300])
@@ -158,6 +166,8 @@ def walk(root, source_prefix, book, rows, depth=0, known=None):
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--name', required=True, help='snapshot name, e.g. the date; an existing one is never replaced')
+    p.add_argument('--quick', action='store_true',
+                   help='check earlier verified files by size and time, not SHA-256 (working rounds only)')
     a = p.parse_args()
     common.require_data_disk()
     out = DATA / 'snapshot' / a.name
@@ -172,7 +182,7 @@ def main():
         root = DATA / 'raw' / book['folder']
         # Only verified complete books enter the study input; every other book is
         # listed with why it is out, so the sample loss is reported, not hidden.
-        if not completed_download(record, root, book['share_url']):
+        if not completed_download(record, root, book['share_url'], strict=not a.quick):
             books.append({'idx': book['idx'], 'folder': book['folder'], 'download_status': status,
                           'included': 'no', 'reason': 'download not complete or files changed since download'})
             continue
@@ -188,7 +198,7 @@ def main():
             continue
         books.append({'idx': book['idx'], 'folder': book['folder'], 'download_status': status,
                       'included': 'yes', 'reason': ''})
-        walk(root, book['folder'], book['folder'], rows, known=known)
+        walk(root, book['folder'], book['folder'], rows, known=known, quick=a.quick)
     if not rows:
         raise SystemExit('no completely downloaded book to freeze')
     if len({r['source'] for r in rows}) != len(rows):

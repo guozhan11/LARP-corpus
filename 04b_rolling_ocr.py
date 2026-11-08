@@ -90,7 +90,7 @@ def one_round(limit, workers):
     existing = rounds()
     number = int(existing[-1][len(PREFIX):]) + 1 if existing else 1
     name = f'{PREFIX}{number:02d}'
-    step('03_snapshot.py', '--name', name)
+    step('03_snapshot.py', '--name', name, '--quick')   # the full snapshot afterwards re-hashes everything
     done = settled_books()
     todo = [b['idx'] for b in read_csv(DATA / 'snapshot' / name / 'books.csv')
             if b['included'] == 'yes' and b['folder'] not in done]
