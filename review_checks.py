@@ -37,6 +37,7 @@ snapshot = import_module('03_snapshot')
 ocr = import_module('04_ocr')
 rolling_ocr = import_module('04b_rolling_ocr')
 evaluate = import_module('05_evaluate')
+assemble = import_module('06_assemble')
 
 
 class ArchiveChecks(unittest.TestCase):
@@ -702,6 +703,82 @@ class WorkflowChecks(unittest.TestCase):
         with patch.object(rolling_ocr, 'step', step), patch.object(rolling_ocr, 'download_running', lambda: False):
             self.call(rolling_ocr, '--max-total-cny', '600')
         self.assertEqual(calls, [])
+
+
+class AssembleChecks(unittest.TestCase):
+    def test_filled_pages_replace_failed_ones(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ocr_dir = Path(tmp)
+            (ocr_dir / 'text' / 'b').mkdir(parents=True)
+            (ocr_dir / 'text' / 'b' / 'x.pdf.txt').write_text('一\f\f三', encoding='utf-8')
+            row = {'source': 'b/x.pdf', 'kind': 'pdf'}
+            record = {'status': 'partial', 'failed_pages': [2]}
+            self.assertEqual(assemble.page_text(ocr_dir, row, record),
+                             ([(1, '一'), (2, '〔本页缺失：OCR 失败〕'), (3, '三')], 1, 0))
+            self.assertEqual(assemble.page_text(ocr_dir, row, record, {2: '二'}),
+                             ([(1, '一'), (2, '二'), (3, '三')], 0, 1))
+            failed = {'status': 'failed', 'error': 'ValueError: request failed: 400'}
+            self.assertEqual(assemble.page_text(ocr_dir, row, failed, {1: '甲', 2: '乙'}),
+                             ([(1, '甲'), (2, '乙')], 0, 2))
+            self.assertEqual(assemble.page_text(ocr_dir, row, failed), ([(None, '〔整份缺失：OCR 失败〕')], 1, 0))
+            # page 3 could not be filled either: it stays missing and the file keeps 3 pages
+            self.assertEqual(assemble.page_text(ocr_dir, row, failed, {1: '甲', 2: '乙', 3: None}),
+                             ([(1, '甲'), (2, '乙'), (3, '〔本页缺失：OCR 失败〕')], 1, 2))
+
+    def test_pages_sort_in_natural_order(self):
+        names = ['军官_10.jpg', '军官_2.jpg', '军官_1.jpg']
+        self.assertEqual(sorted(names, key=assemble.natural_key), ['军官_1.jpg', '军官_2.jpg', '军官_10.jpg'])
+
+    def test_document_types_from_paths(self):
+        cases = {('线索', '第一幕', '1.jpg'): '线索',                       # an act folder inside clues stays a clue
+                 ('线索卡', '第一幕', '第二轮', '莫轩庭.pdf'): '线索',
+                 ('售后资料', '打斗人物技能使用表.xlsx'): '宣传与售后',        # after-sales folder wins over 人物
+                 ('组织手册', '组织者手册.pdf'): '主持人手册',
+                 ('人物剧本', '军官', '军官_1.jpg'): '人物剧本',
+                 ('第二幕', '张三.pdf'): '其他',                             # act names say nothing about type
+                 ('剧本及线索', '核弹.pdf'): '其他',                         # a mixed folder does not decide
+                 ('剧本', 'B本（黄色封面）', '1.pdf'): '人物剧本',            # bracketed notes are ignored
+                 ('卡洛斯.pdf',): '其他',
+                 ('人物剧本', '封面.pdf'): '宣传与售后',                     # a cover next to the file
+                 ('剧本', '封面200g铜版纸覆膜-内页80g', '4赵斌.pdf'): '人物剧本',  # print spec, not a cover
+                 ('三国新语', '姜维.pdf'): '其他',
+                 ('开本资料', '结局', '苏南屿结局.pdf'): '人物剧本',          # a character's ending goes to that player
+                 ('结局', '结局阶段小剧场（主持人端）.doc'): '主持人手册',    # read out by the host
+                 ('开本资料', '结局卡'): '线索',
+                 ('剧本', '诡计详解', ''): '主持人手册',                      # a trick explanation is for the host
+                 ('线索', '线索详解（简版）.docx'): '线索',                    # clue words come before weak host words
+                 ('剧本', '格拉多之门剧本勘误.docx'): '主持人手册',
+                 ('开本资料', '勘误：10号线索卡.txt'): '线索',
+                 ('人物剧本', '开本指南内页.pdf'): '主持人手册',
+                 ('开本资料', '复盘相关内容', '剧本内容物清单.pdf'): '主持人手册',  # a list, not a role book
+                 ('道具清单.docx',): '线索',
+                 ('结局解析（图片1张）', ''): '主持人手册'}
+        for parts, expected in cases.items():
+            self.assertEqual(assemble.doc_type(list(parts)), expected, parts)
+
+    def test_single_page_pdf_folders_join(self):
+        records = {f'b/角色/SKM_{i}.pdf': {'pages': 1} for i in range(3)}
+        records.update({'b/线索/a.pdf': {'pages': 1}, 'b/线索/b.pdf': {'pages': 1},   # only 2: kept apart
+                        'b/剧本/a.pdf': {'pages': 1}, 'b/剧本/b.pdf': {'pages': 1}, 'b/剧本/c.pdf': {'pages': 9}})
+        rows = [{'source': s, 'kind': 'pdf'} for s in records]
+        self.assertEqual(assemble.page_pdf_folders(rows, records), {'b/角色'})
+
+    def test_ending_reader_from_its_words(self):
+        player = '你看着窗外的雨，想起了那天。你终于明白，' * 20
+        host = '请主持人宣读以下内容。请所有玩家闭眼，播放BGM。主持人念：大雨落下。' * 20
+        self.assertEqual(assemble.ending_reader_from_text(player), '人物剧本')
+        self.assertEqual(assemble.ending_reader_from_text(host), '主持人手册')
+        self.assertIsNone(assemble.ending_reader_from_text('结局'))   # too short to tell
+
+    def test_wrapper_folders_do_not_decide_the_type(self):
+        types = assemble.book_types('0014_蜕变俱乐部', [
+            ('012-蜕变俱乐部（7人）欧洲烧脑机制反转', '91蜕变俱乐部', '安娜.pdf'),   # genre label 机制 is ignored
+            ('012-蜕变俱乐部（7人）欧洲烧脑机制反转', '91蜕变俱乐部', '线索', '')])
+        self.assertEqual(types, ['其他', '线索'])
+        self.assertEqual(assemble.book_types('2772_腐萤哀鸣之刻（单手册）', [('腐萤哀鸣之刻主持人手册', '腐萤手册.pdf')]),
+                         ['主持人手册'])   # an unmistakable wrapper name is used when nothing else matched
+        self.assertEqual(assemble.book_types('1090_答案', [('976答案----------', '人物剧本', '墨镜男人', ''),
+                                                          ('976答案----------', '')]), ['人物剧本', '其他'])
 
 
 if __name__ == '__main__':

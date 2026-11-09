@@ -16,7 +16,9 @@ repository. Neither are the book list, share links or API key.
 | `03_snapshot.py` | Freezes the verified books so the inputs can never change | `snapshot/<name>/`, `inputs/` |
 | `04_ocr.py` | Extracts text from every readable file | `ocr/<name>/text/` |
 | `04b_rolling_ocr.py` | Optional: repeats steps 03 and 04 while a download is running | `rolling_NN` snapshots |
+| `04c_fill_pages.py` | Reads the pages step 04's model could not (moderation rejections) with other models | `ocr/<name>_fill/` |
 | `05_evaluate.py` | Optional: samples pages for people to correct, then measures the error rate | `evaluation/<name>/` |
+| `06_assemble.py` | Joins the per-file text into documents, book by book, and guesses each document's type | `assembled/<name>/` |
 
 `common.py` holds shared settings, `prompt.txt` holds the model's instructions,
 and `review_checks.py` holds automated tests that use made-up data.
@@ -37,6 +39,8 @@ python 02_download.py
 python 03_snapshot.py --name batch1
 python 04_ocr.py --snapshot batch1 --max-cost-cny 1000
 python 04_ocr.py --snapshot batch1 --offline
+python 04c_fill_pages.py --ocr batch1 --max-cost-cny 10   # needs Ollama with qwen3.5:9b
+python 06_assemble.py --ocr batch1
 ```
 
 Put two settings in a `.env` file in this folder, which Git ignores:
@@ -71,6 +75,12 @@ and files that failed are retried. Use that final snapshot for any reported resu
 Audio and video are not downloaded. Unsupported files and encrypted or damaged
 archives are left out, with the reason recorded in the snapshot's `files.csv`.
 
+Aliyun's moderation filter rejects some pages for `qwen3.7-flash` every time.
+`04c_fill_pages.py` sends only those pages to `qwen3.8-flash` (same prompt), and
+any it still rejects to the local `qwen3.5:9b` through Ollama, which has no filter.
+Step 04's text is not changed; `ocr/<name>_fill/pages.csv` lists each filled page
+and its model, and step 06 uses them. In batch1 this filled 234 pages (232 and 2).
+
 Images too tall to send at full resolution are cut into pieces in the blank space between lines. Where no
 blank space exists, pieces overlap by 5%, so some text may repeat. These files are
 flagged `overlapping_tiles_need_review`.
@@ -85,8 +95,11 @@ flagged `overlapping_tiles_need_review`.
 - **The text is not guaranteed to match the original.** The model can misread or
   miss words. Only `05_evaluate.py` measures this, and it covers model-read pages
   only. If it has not been run, report that accuracy was not measured.
-- **Books are not assembled.** Each source file gets its own text file. Combining
-  files into a book, ordering them and removing repeated text are not done here.
+- **Assembly does not remove repeats or choose versions.** `06_assemble.py` joins
+  each book's files into documents with a marker before every page, and keeps
+  every file, including duplicate and watermarked versions. Its document types
+  (人物剧本, 主持人手册, 线索 …) are guesses from names, plus the text for endings;
+  check `documents.csv` before relying on them.
 - **Costs are estimates.** The limit uses token counts and the prices in
   `common.py`. Requests in progress can exceed it. The provider's bill is final.
 
@@ -102,6 +115,12 @@ flagged `overlapping_tiles_need_review`.
   A record still marked `started` did not finish.
 - **Changing the method:** changing `04_ocr.py`, the prompt or the model settings
   requires a new snapshot name.
+- **Reruns without re-rendering:** `ocr/page_index/` records each file's page-image
+  hashes under a key for the render settings, library versions and rendering code,
+  so a rerun finds saved responses without rendering again (batch1: 33 minutes
+  instead of about 12 hours). Any change to those misses the index and renders as
+  before. `04_ocr.py --snapshot NAME --seed-page-index 200` fills it from a finished
+  run after re-rendering 200 random files to confirm they match.
 
 ## Evaluation (optional)
 

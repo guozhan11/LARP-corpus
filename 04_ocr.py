@@ -7,6 +7,7 @@ and a full-snapshot results.csv. Offline replay compares every text file.
 
 python 04_ocr.py --snapshot batch1 [--only 1395] [--redo-failed]
 python 04_ocr.py --snapshot batch1 --offline
+python 04_ocr.py --snapshot batch1 --seed-page-index 200   # index an earlier run's pages
 """
 import argparse
 import common
@@ -14,6 +15,7 @@ import base64
 import concurrent.futures
 import concurrent.futures.process
 import hashlib
+import inspect
 import io
 import json
 import multiprocessing
@@ -29,6 +31,7 @@ from pathlib import Path
 from xml.etree import ElementTree
 import fitz
 import openpyxl
+import PIL
 import pillow_heif
 from PIL import Image, ImageOps
 from common import (API_URL, DATA, HERE, JPEG_QUALITY, LONG_SIDE, MODEL, PARAMETERS, PRICE_CNY_PER_MILLION, PROMPT,
@@ -222,6 +225,27 @@ def pdf_pages(path, notes=None):
         yield image
 
 
+# Page index: the page-image hashes of each image/PDF file under one render key, so a
+# rerun finds the kept responses without rendering the file again (batch1's mostly
+# cached pass spent ~12 hours re-rendering). The key covers everything that shapes a
+# page image: the settings, the library versions and the rendering code itself, so
+# any change to them makes the index miss and the file is rendered as before.
+RENDER_CODE = (flat_rgb, jpeg, blank_row, blank_cut, tall_tiles, image_pages, pdf_info, render_page, pdf_pages)
+RENDER_KEY = hashlib.sha256(json.dumps({
+    'long_side': LONG_SIDE, 'jpeg_quality': JPEG_QUALITY, 'tall_ratio': TALL_RATIO, 'tile_overlap': TILE_OVERLAP,
+    'seam_search': SEAM_SEARCH, 'blank_range': BLANK_RANGE, 'blank_band': BLANK_BAND,
+    'pymupdf': fitz.VersionBind, 'mupdf': fitz.VersionFitz, 'pillow': PIL.__version__,
+    'pillow_heif': pillow_heif.__version__, 'code': [inspect.getsource(f) for f in RENDER_CODE]},
+    sort_keys=True).encode()).hexdigest()[:16]
+PAGE_INDEX = DATA / 'ocr' / 'page_index' / RENDER_KEY
+INDEXED_KINDS = {'image': ('ocr_image', image_pages), 'pdf': ('ocr_pdf', pdf_pages)}  # slides need a conversion first
+NOTE_KEYS = ('render_warnings', 'unembedded_cid_fonts', 'repaired_file_structure', 'overlapping_tiles_need_review')
+
+
+def page_index_file(source_sha256):
+    return PAGE_INDEX / f'{source_sha256}.json'
+
+
 def convert(path, target_format, keep_as, export_filter='', offline=False):
     """Serialize conversion and verify the saved intermediate before reuse."""
     with CONVERT_LOCK:
@@ -343,10 +367,46 @@ def key_lock(key):
         return _KEY_LOCKS.setdefault(key, threading.Lock())
 
 
+def response_key(image_sha):
+    return hashlib.sha256(json.dumps([API_URL, image_sha, PROMPT_SHA256, PARAMETERS], sort_keys=True).encode()).hexdigest()
+
+
+def kept_text(image_sha, budget):
+    """Text of the kept, accepted response for a page image hash, or None."""
+    key = response_key(image_sha)
+    kept = read_json(RESPONSES / f'{key}.json')
+    if not kept:
+        return None
+    if (kept['image_sha256'] != image_sha or kept['prompt_sha256'] != PROMPT_SHA256
+            or kept['parameters'] != PARAMETERS):
+        raise ValueError('invalid cached response')
+    try:
+        text = response_text(kept['response'])
+    except ValueError:
+        return None   # rendered and handled as before, so the error is recorded the same way
+    with budget.lock:
+        budget.receipts.add(RESPONSES / f'{key}.json')
+    return text
+
+
+def indexed_pages(row, budget):
+    """(pages, notes) from the page index when every page has a kept response, else None."""
+    entry = read_json(page_index_file(row['sha256']))
+    if not entry or entry.get('method') != INDEXED_KINDS[row['kind']][0]:
+        return None
+    pages = []
+    for image_sha in entry['page_image_sha256']:
+        text = kept_text(image_sha, budget)
+        if text is None:
+            return None
+        pages.append((text, image_sha, None))
+    return pages, entry['notes']
+
+
 def transcribe(image, budget):
     """Model text for one page image, from the kept responses when possible."""
     image_sha = hashlib.sha256(image).hexdigest()
-    key = hashlib.sha256(json.dumps([API_URL, image_sha, PROMPT_SHA256, PARAMETERS], sort_keys=True).encode()).hexdigest()
+    key = response_key(image_sha)
     with key_lock(key):
         result = transcribe_locked(image, image_sha, key, budget)
         with budget.lock:
@@ -459,14 +519,20 @@ def process(row, out, budget):
         kept = DATA / 'ocr' / 'converted' / row['sha256']
         notes = {}
         if row['kind'] in ('image', 'pdf', 'slides'):
-            if row['kind'] == 'image':
-                images, method = image_pages(path, notes), 'ocr_image'
-            elif row['kind'] == 'pdf':
-                images, method = pdf_pages(path, notes), 'ocr_pdf'
+            indexed = indexed_pages(row, budget) if row['kind'] in INDEXED_KINDS else None
+            if indexed:
+                (pages, notes), method = indexed, INDEXED_KINDS[row['kind']][0]
             else:
-                images, method = pdf_pages(convert(path, 'pdf', kept.with_suffix('.pdf'), SLIDES_FILTER, budget.offline),
-                                           notes), 'libreoffice_pdf_then_ocr'
-            pages = transcribe_all(images, budget)
+                if row['kind'] in INDEXED_KINDS:
+                    method, render = INDEXED_KINDS[row['kind']]
+                    images = render(path, notes)
+                else:
+                    images, method = pdf_pages(convert(path, 'pdf', kept.with_suffix('.pdf'), SLIDES_FILTER,
+                                                       budget.offline), notes), 'libreoffice_pdf_then_ocr'
+                pages = transcribe_all(images, budget)
+                if row['kind'] in INDEXED_KINDS:   # every page rendered (a render error raises before this)
+                    write_json(page_index_file(row['sha256']), {'method': method, 'notes': notes,
+                                                                'page_image_sha256': [h for _, h, _ in pages]})
             failed = [(number, error) for number, (_, _, error) in enumerate(pages, 1) if error]
             if failed and len(failed) == len(pages):
                 raise ValueError(failed[0][1])
@@ -523,9 +589,35 @@ def valid_done(row, out, record):
             and text.is_file() and sha256(text) == record.get('text_sha256'))
 
 
+def seed_page_index(snapshot, check):
+    """Fill the page index from a finished run's file records, after re-rendering a
+    random sample of them to confirm the current render key reproduces their pages."""
+    import random
+    out = DATA / 'ocr' / snapshot
+    rows = [r for r in read_csv(DATA / 'snapshot' / snapshot / 'files.csv') if r['kind'] in INDEXED_KINDS]
+    entries = []
+    for row in rows:
+        record = read_json(file_record(out, row), {})
+        if (record.get('source_sha256') == row['sha256'] and record.get('page_image_sha256')
+                and record.get('method') == INDEXED_KINDS[row['kind']][0]):
+            entries.append((row, {'method': record['method'], 'page_image_sha256': record['page_image_sha256'],
+                                  'notes': {k: record[k] for k in NOTE_KEYS if k in record}}))
+    sample = random.Random(0).sample(entries, min(check, len(entries)))
+    for row, entry in sample:
+        notes = {}
+        images = INDEXED_KINDS[row['kind']][1](DATA / row['path'], notes)
+        if [hashlib.sha256(i).hexdigest() for i in images] != entry['page_image_sha256'] or notes != entry['notes']:
+            raise SystemExit(f"render differs from the recorded run for {row['source']}; index not written")
+    for row, entry in entries:
+        write_json(page_index_file(row['sha256']), entry)
+    print({'render_key': RENDER_KEY, 'indexed_files': len(entries), 'rerendered_and_matched': len(sample)})
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--snapshot', required=True)
+    p.add_argument('--seed-page-index', type=int, metavar='CHECK',
+                   help="index a finished run's page hashes (after re-rendering CHECK random files to confirm) and exit")
     p.add_argument('--only', nargs='*', help='book numbers (idx) to process; summary still covers the full snapshot')
     p.add_argument('--offline', action='store_true', help='replay all files; no model requests or conversions')
     p.add_argument('--redo-failed', action='store_true')
@@ -535,6 +627,8 @@ def main():
                    help='also keep every JPEG sent (about 0.3-0.7 MB per page); pages can otherwise be re-rendered')
     a = p.parse_args()
     common.require_data_disk()
+    if a.seed_page_index is not None:
+        return seed_page_index(a.snapshot, a.seed_page_index)
     if a.workers < 1 or a.max_cost_cny < 0:
         p.error('workers must be positive and cost must be nonnegative')
     if a.offline and a.only:
