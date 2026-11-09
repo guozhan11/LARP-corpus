@@ -9,3 +9,6 @@ __pycache__/
 codebook/
 .Rhistory
 meetings/
+
+# Analysis code stays local until publication
+analysis/

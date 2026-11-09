@@ -8,7 +8,7 @@ responses are reused, so finished pages are not paid for again.
 The limit covers all rounds, using 04_ocr.py's cost estimates from finished runs.
 Stop with Ctrl-C if needed; an interrupted OCR run's spending is not counted.
 
-python 04b_rolling_ocr.py [--max-total-cny 1000] [--min-new-books 5] [--interval 600]
+python 04b_rolling_ocr.py --max-total-cny LIMIT [--min-new-books 5] [--interval 600]
 """
 import argparse
 import common
@@ -105,7 +105,7 @@ def one_round(limit, workers):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('--max-total-cny', type=float, default=1000.0, help='estimated limit across all rounds')
+    p.add_argument('--max-total-cny', type=float, required=True, help='estimated limit across all rounds')
     p.add_argument('--min-new-books', type=int, default=5, help='wait for this many newly finished books')
     p.add_argument('--interval', type=int, default=600, help='seconds between checks')
     p.add_argument('--workers', type=int, default=4, help='passed to 04_ocr.py')

@@ -661,10 +661,10 @@ class WorkflowChecks(unittest.TestCase):
             step(script, *args)
         with patch.object(rolling_ocr, 'download_running', lambda: False):
             with patch.object(rolling_ocr, 'step', interrupted), self.assertRaises(SystemExit):
-                self.call(rolling_ocr)
+                self.call(rolling_ocr, '--max-total-cny', '50')
             self.assertEqual(rolling_ocr.settled_books(), set())
             with patch.object(rolling_ocr, 'step', step):
-                self.call(rolling_ocr)
+                self.call(rolling_ocr, '--max-total-cny', '50')
         self.assertEqual(rolling_ocr.settled_books(), {'0001_synthetic', '0002_synthetic'})
 
     def rolling_steps(self):
@@ -686,7 +686,7 @@ class WorkflowChecks(unittest.TestCase):
         with patch.object(rolling_ocr, 'step', step), \
                 patch.object(rolling_ocr, 'download_running', lambda: next(running)), \
                 patch.object(rolling_ocr.time, 'sleep', second_book_finishes):
-            self.call(rolling_ocr, '--min-new-books', '1')
+            self.call(rolling_ocr, '--max-total-cny', '50', '--min-new-books', '1')
         only = [args[args.index('--only') + 1:args.index('--workers')] for script, args in calls if script == '04_ocr.py']
         self.assertEqual(only, [('0001',), ('0002',)])
         self.assertEqual(rolling_ocr.rounds(), ['rolling_01', 'rolling_02'])

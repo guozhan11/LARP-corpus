@@ -5,7 +5,10 @@ text files. It downloads each script, freezes an exact copy of the files, and
 extracts their text. An optional last step estimates how accurate the text is.
 
 The scripts and extracted text are restricted data, so they are not in this
-repository. Neither are the book list, share links or API key.
+repository. Neither are the book list, share links or API key. This project uses
+the scripts with permission; anyone running the code needs their own permission
+to download and use the material. Analysis code and coding instructions are not
+part of this repository.
 
 ## The steps
 
@@ -37,7 +40,7 @@ python -B review_checks.py
 python 01_make_book_list.py --scope /path/to/scope.json --manifest /path/to/manifest.csv
 python 02_download.py
 python 03_snapshot.py --name batch1
-python 04_ocr.py --snapshot batch1 --max-cost-cny 1000
+python 04_ocr.py --snapshot batch1 --max-cost-cny LIMIT
 python 04_ocr.py --snapshot batch1 --offline
 python 04c_fill_pages.py --ocr batch1 --max-cost-cny 10   # needs Ollama with qwen3.5:9b
 python 06_assemble.py --ocr batch1
@@ -54,9 +57,9 @@ LARP_DATA=/absolute/path/to/data-folder
 `~/LARP_data/replication`. An external disk is needed only if that is where you
 point it.
 
-**Working without the external disk.** The analysis scripts need only the
-assembled documents, `analysis/`, the OCR text, `snapshot/` and `books.csv`.
-`./sync_local.sh pull` copies these from the disk to a local folder (and the
+**Working without the external disk.** Work on the results needs only the
+assembled documents, the OCR text, `snapshot/`, `books.csv` and any `analysis/`
+output. `./sync_local.sh pull` copies these from the disk to a local folder (and the
 assembled documents to a second folder); point `LARP_DATA` at the local folder.
 Steps 01–06 need the full data on the disk: run them with
 `LARP_DATA=/path/on/disk python3 ...`, then `./sync_local.sh pull` again.
@@ -68,8 +71,8 @@ download. Any stopped step can simply be run again and continues where it left o
 The download stops by itself if the Baidu account is no longer reachable: log in and rerun.
 
 **To extract text during a download**, run `python 04b_rolling_ocr.py` instead of
-steps 03 and 04. Its estimated spending limit is 1000 CNY across all rounds,
-excluding interrupted runs. Its results are working copies: after the download,
+steps 03 and 04. `--max-total-cny` sets its estimated spending limit across all
+rounds, excluding interrupted runs. Its results are working copies: after the download,
 take one full snapshot and run step 04 on it. Pages already paid for are reused,
 and files that failed are retried. Use that final snapshot for any reported results.
 
@@ -144,13 +147,6 @@ The result is the character error rate: the share of characters that are wrong,
 ignoring whitespace. It comes with a 95% interval that resamples whole books. It
 describes the completed pages of this corpus, not all such scripts. Files read
 directly and files left out need separate assessment.
-
-## Analysis
-
-`analysis/` holds scripts that work on the assembled documents: splitting them
-into coding units and labelling those units with an LLM. The coding instructions
-(codebook) they read are kept outside this repository; `llm_label.py --codebook`
-takes their path.
 
 ## Sharing
 

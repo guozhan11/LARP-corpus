@@ -4,7 +4,7 @@ Step 04 leaves a page empty when no accepted response exists for it, which is
 almost always a 400 DataInspectionFailed from the moderation filter. Rejection
 depends on the model: qwen3.8-flash passed 99% of these pages in a test, and the
 local qwen3.5:9b (Ollama, no filter) reads the rest; accuracy on 40 hand-checked
-pages was close to the main model (see meetings/2026-11-08_progress.html).
+pages was close to the main model.
 
 Same prompt as step 04. Responses are kept under ocr/fill_responses/ keyed by
 model, image, prompt and settings, so a rerun costs nothing. Step 04's own text
