@@ -1,6 +1,6 @@
 # LARP corpus: from downloaded scripts to text
 
-This code turns a fixed list of 852 Chinese murder-mystery scripts (剧本杀) into
+This code turns a fixed list of Chinese murder-mystery scripts (剧本杀) into
 text files. It downloads each script, freezes an exact copy of the files, and
 extracts their text. An optional last step estimates how accurate the text is.
 
@@ -11,7 +11,7 @@ repository. Neither are the book list, share links or API key.
 
 | Script | What it does | Main result |
 |---|---|---|
-| `01_make_book_list.py` | Fixes the list of 852 books and their share links | `books.csv` |
+| `01_make_book_list.py` | Fixes the list of books and their share links | `books.csv` |
 | `02_download.py` | Downloads each book and checks that the files arrived intact | `raw/` |
 | `03_snapshot.py` | Freezes the verified books so the inputs can never change | `snapshot/<name>/`, `inputs/` |
 | `04_ocr.py` | Extracts text from every readable file | `ocr/<name>/text/` |
@@ -25,8 +25,8 @@ and `review_checks.py` holds automated tests that use made-up data.
 
 ## Running it
 
-You need a Mac with Python 3.12, LibreOffice, BaiduPCS-Go logged in to the
-research account, and about 300 GB of disk space.
+You need a Mac with Python 3.12, LibreOffice, BaiduPCS-Go logged in to an
+account with access to the shares, and about 300 GB of disk space.
 
 ```bash
 python3 -m venv .venv
@@ -90,7 +90,7 @@ Aliyun's moderation filter rejects some pages for `qwen3.7-flash` every time.
 `04c_fill_pages.py` sends only those pages to `qwen3.8-flash` (same prompt), and
 any it still rejects to the local `qwen3.5:9b` through Ollama, which has no filter.
 Step 04's text is not changed; `ocr/<name>_fill/pages.csv` lists each filled page
-and its model, and step 06 uses them. In batch1 this filled 234 pages (232 and 2).
+and its model, and step 06 uses them.
 
 Images too tall to send at full resolution are cut into pieces in the blank space between lines. Where no
 blank space exists, pieces overlap by 5%, so some text may repeat. These files are
@@ -128,9 +128,8 @@ flagged `overlapping_tiles_need_review`.
   requires a new snapshot name.
 - **Reruns without re-rendering:** `ocr/page_index/` records each file's page-image
   hashes under a key for the render settings, library versions and rendering code,
-  so a rerun finds saved responses without rendering again (batch1: 33 minutes
-  instead of about 12 hours). Any change to those misses the index and renders as
-  before. `04_ocr.py --snapshot NAME --seed-page-index 200` fills it from a finished
+  so a rerun finds saved responses without rendering again. Any change to those
+  misses the index and renders as before. `04_ocr.py --snapshot NAME --seed-page-index 200` fills it from a finished
   run after re-rendering 200 random files to confirm they match.
 
 ## Evaluation (optional)
@@ -145,6 +144,13 @@ The result is the character error rate: the share of characters that are wrong,
 ignoring whitespace. It comes with a 95% interval that resamples whole books. It
 describes the completed pages of this corpus, not all such scripts. Files read
 directly and files left out need separate assessment.
+
+## Analysis
+
+`analysis/` holds scripts that work on the assembled documents: splitting them
+into coding units and labelling those units with an LLM. The coding instructions
+(codebook) they read are kept outside this repository; `llm_label.py --codebook`
+takes their path.
 
 ## Sharing
 

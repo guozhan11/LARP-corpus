@@ -5,7 +5,7 @@ __pycache__/
 .venv/
 .DS_Store
 
-# Earlier codebook drafts and internal notes stay local
-codebook/internal/
+# Codebook is confidential and stays local
+codebook/
 .Rhistory
 meetings/

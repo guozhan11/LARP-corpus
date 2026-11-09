@@ -127,15 +127,15 @@ class WorkflowChecks(unittest.TestCase):
 
     def test_book_list_uses_documented_schema_and_is_write_once(self):
         entries = [{'title': f'synthetic {i}', 'selected': {'idx': f'{i:04d}', 'folder': f'{i:04d}_synthetic'}}
-                   for i in range(1, 853)]
+                   for i in range(1, 21)]
         scope = self.root / 'scope.json'
         common.write_json(scope, {'rows': entries})
         manifest = self.root / 'manifest.csv'
         common.write_csv(manifest, [{**e['selected'], 'url_with_pwd': 'https://pan.baidu.com/s/synthetic'}
                                    for e in entries], ['idx', 'folder', 'url_with_pwd'])
-        self.call(make_book_list, '--scope', str(scope), '--manifest', str(manifest))
+        self.call(make_book_list, '--scope', str(scope), '--manifest', str(manifest), '--expect', '20')
         books = self.root / 'books.csv'
-        self.assertEqual(len(common.read_csv(books)), 852)
+        self.assertEqual(len(common.read_csv(books)), 20)
         digest = common.sha256(books)
         with self.assertRaises(SystemExit):
             self.call(make_book_list, '--scope', str(scope), '--manifest', str(manifest))

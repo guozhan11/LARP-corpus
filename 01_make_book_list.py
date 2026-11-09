@@ -1,12 +1,12 @@
-"""Write the fixed list of 852 scripts studied, with their share links.
+"""Write the fixed list of scripts, with their share links.
 
-The study scope (852 titles rated 7.0 or higher, one version each) was decided
-before this code; it is read from the scope file and the link manifest and
-written once as books.csv. Every later step reads only books.csv.
+The scope (one version of each title) was decided before this code; it is read
+from the scope file and the link manifest and written once as books.csv. Every later step reads only books.csv.
 
 python3 01_make_book_list.py \
     --scope /path/to/scope.json \
-    --manifest data/manifest.csv
+    --manifest data/manifest.csv \
+    --expect N          # optional: stop unless the list has exactly N books
 """
 import argparse
 import common
@@ -19,6 +19,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--scope', type=Path, required=True)
     p.add_argument('--manifest', type=Path, required=True)
+    p.add_argument('--expect', type=int, help='number of books the scope must contain')
     a = p.parse_args()
     common.require_data_disk()
     if (DATA / 'books.csv').exists():
@@ -32,8 +33,10 @@ def main():
         if link['folder'] != item['selected']['folder'] or not link['url_with_pwd'].startswith('https://pan.baidu.com/s/'):
             raise SystemExit(f'manifest and scope disagree for {idx}')
         rows.append({'idx': idx, 'folder': link['folder'], 'title': item['title'], 'share_url': link['url_with_pwd']})
-    if len(rows) != 852 or len({r['folder'] for r in rows}) != 852:
-        raise SystemExit('expected 852 distinct books')
+    if not rows or len({r['folder'] for r in rows}) != len(rows):
+        raise SystemExit('the scope must list distinct books')
+    if a.expect is not None and len(rows) != a.expect:
+        raise SystemExit(f'expected {a.expect} books, found {len(rows)}')
     out = DATA / 'books.csv'
     out.parent.mkdir(parents=True, exist_ok=True)
     write_csv(out, sorted(rows, key=lambda r: r['idx']), ['idx', 'folder', 'title', 'share_url'])
