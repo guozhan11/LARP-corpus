@@ -1,12 +1,12 @@
 #!/bin/bash
-# Keep a local working copy of the corpus data in step with the T7 disk.
+# Keep a local working copy of the corpus data in step with the external data disk.
 #
-#   ./sync_local.sh pull   T7 -> ~/LARP_corpus_data and ~/Desktop/LARP_assembled
-#                          (run after rerunning OCR or assembly on T7)
-#   ./sync_local.sh push   ~/LARP_corpus_data/analysis -> T7 (backup of analysis output)
+#   ./sync_local.sh pull   disk -> ~/LARP_corpus_data and ~/Desktop/LARP_assembled
+#                          (run after rerunning OCR or assembly on the disk)
+#   ./sync_local.sh push   ~/LARP_corpus_data/analysis -> disk (backup of analysis output)
 #
 # Add -n to see what would change without copying, e.g. ./sync_local.sh pull -n
-# pull mirrors the pipeline outputs: files no longer on T7 are removed from the
+# pull mirrors the pipeline outputs: files no longer on the disk are removed from the
 # local copies. analysis/ is never deleted from either side.
 set -euo pipefail
 
