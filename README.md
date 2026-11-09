@@ -52,7 +52,18 @@ LARP_DATA=/absolute/path/to/data-folder
 
 `LARP_DATA` must be outside this folder. It defaults to
 `~/LARP_data/replication`. An external disk is needed only if that is where you
-point it. Run one command at a time, except `04b_rolling_ocr.py` alongside the
+point it.
+
+**Working without the external disk.** The analysis scripts need only the
+assembled documents, `analysis/`, the OCR text, `snapshot/` and `books.csv`.
+`./sync_local.sh pull` copies these from the disk to a local folder (and the
+assembled documents to a second folder); point `LARP_DATA` at the local folder.
+Steps 01–06 need the full data on the disk: run them with
+`LARP_DATA=/path/on/disk python3 ...`, then `./sync_local.sh pull` again.
+`./sync_local.sh push` backs up local `analysis/` output to the disk. Edit the
+paths at the top of the script for your own folders.
+
+Run one command at a time, except `04b_rolling_ocr.py` alongside the
 download. Any stopped step can simply be run again and continues where it left off.
 The download stops by itself if the Baidu account is no longer reachable: log in and rerun.
 
